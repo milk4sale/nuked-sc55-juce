@@ -14,6 +14,7 @@
 
 class MainComponent : public juce::AudioAppComponent,
                       public juce::MenuBarModel,
+                      public juce::FileDragAndDropTarget,
                       private juce::MidiInputCallback,
                       private juce::Timer
 {
@@ -29,17 +30,26 @@ public:
     // juce::Component
     void paint (juce::Graphics& g) override;
     void resized() override;
+    void paintOverChildren (juce::Graphics& g) override;
 
     // juce::MenuBarModel
     juce::StringArray getMenuBarNames() override;
     juce::PopupMenu getMenuForIndex (int topLevelMenuIndex, const juce::String& menuName) override;
     void menuItemSelected (int menuItemID, int topLevelMenuIndex) override;
 
+    // juce::FileDragAndDropTarget
+    bool isInterestedInFileDrag (const juce::StringArray& files) override;
+    void filesDropped (const juce::StringArray& files, int x, int y) override;
+    void fileDragEnter (const juce::StringArray& files, int x, int y) override;
+    void fileDragExit (const juce::StringArray& files) override;
+
 private:
     void handleIncomingMidiMessage (juce::MidiInput*, const juce::MidiMessage&) override;
     void timerCallback() override;
 
     void pickMidiFile();
+    bool loadMidiFile (const juce::File& f);
+    static bool isMidiFile (const juce::File& f);
     void doPlayPause();
     void doStop();
     void openPreferences();
@@ -78,6 +88,7 @@ private:
     int          currentModelIndex = 0;
     juce::File   lastMidiFile;
     juce::ApplicationProperties props;
+    bool dragHover = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

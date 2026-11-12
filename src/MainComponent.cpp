@@ -220,6 +220,17 @@ void MainComponent::paint (juce::Graphics& g)
     g.fillRect (nb.getX(), nb.getBottom() + 4, nb.getWidth(), 1);
 }
 
+void MainComponent::paintOverChildren (juce::Graphics& g)
+{
+    if (! dragHover) return;
+    g.setColour (juce::Colour::fromRGB (90, 160, 255).withAlpha (0.15f));
+    g.fillAll();
+    g.setColour (juce::Colour::fromRGB (90, 160, 255));
+    g.drawRect (getLocalBounds(), 3);
+    g.setFont (juce::FontOptions (20.0f, juce::Font::bold));
+    g.drawText ("Drop MIDI file to play", getLocalBounds(), juce::Justification::centred);
+}
+
 void MainComponent::resized()
 {
     auto area = getLocalBounds();
@@ -328,8 +339,11 @@ void MainComponent::pickMidiFile()
                    ? lastMidiFile.getParentDirectory()
                    : juce::File::getSpecialLocation (juce::File::userMusicDirectory);
 
+    // Linux file dialogs match patterns case-sensitively, so list both cases
+    // (lots of MIDI files in the wild are named FOO.MID).
     auto chooser = std::make_shared<juce::FileChooser> (
-        "Open MIDI file", initial, "*.mid;*.midi;*.kar");
+        "Open MIDI file", initial,
+        "*.mid;*.MID;*.Mid;*.midi;*.MIDI;*.kar;*.KAR;*.smf;*.SMF");
 
     chooser->launchAsync (juce::FileBrowserComponent::openMode
                           | juce::FileBrowserComponent::canSelectFiles,
@@ -339,19 +353,71 @@ void MainComponent::pickMidiFile()
         if (! f.existsAsFile()) return;
 
         L ("pickMidiFile selected: " + f.getFullPathName());
-        juce::String err;
-        if (! midiFilePlayer.loadFile (f, err))
-        {
-            L ("loadFile failed: " + err);
-            statusLabel.setText ("Failed to load: " + err, juce::dontSendNotification);
-            return;
-        }
-        lastMidiFile = f;
-        props.getUserSettings()->setValue (kPropsLastFile, f.getFullPathName());
-        nowPlayingLabel.setText (midiFilePlayer.getDescription(), juce::dontSendNotification);
-        seekBar.attachToPlayer (&midiFilePlayer); // refresh length
-        L ("loadFile OK: " + midiFilePlayer.getDescription());
+        loadMidiFile (f);
     });
+}
+
+bool MainComponent::loadMidiFile (const juce::File& f)
+{
+    juce::String err;
+    if (! midiFilePlayer.loadFile (f, err))
+    {
+        L ("loadFile failed: " + err);
+        statusLabel.setText ("Failed to load: " + err, juce::dontSendNotification);
+        return false;
+    }
+    lastMidiFile = f;
+    props.getUserSettings()->setValue (kPropsLastFile, f.getFullPathName());
+    nowPlayingLabel.setText (midiFilePlayer.getDescription(), juce::dontSendNotification);
+    seekBar.attachToPlayer (&midiFilePlayer); // refresh length
+    L ("loadFile OK: " + midiFilePlayer.getDescription());
+    return true;
+}
+
+bool MainComponent::isMidiFile (const juce::File& f)
+{
+    return f.hasFileExtension ("mid;midi;kar;smf"); // case-insensitive
+}
+
+//==============================================================================
+bool MainComponent::isInterestedInFileDrag (const juce::StringArray& files)
+{
+    for (const auto& path : files)
+        if (isMidiFile (juce::File (path)))
+            return true;
+    return false;
+}
+
+void MainComponent::fileDragEnter (const juce::StringArray&, int, int)
+{
+    dragHover = true;
+    repaint();
+}
+
+void MainComponent::fileDragExit (const juce::StringArray&)
+{
+    dragHover = false;
+    repaint();
+}
+
+void MainComponent::filesDropped (const juce::StringArray& files, int, int)
+{
+    dragHover = false;
+    repaint();
+
+    for (const auto& path : files)
+    {
+        const juce::File f (path);
+        if (! isMidiFile (f) || ! f.existsAsFile())
+            continue;
+
+        L ("file dropped: " + f.getFullPathName());
+        const bool wasPlaying = midiFilePlayer.isPlaying();
+        if (wasPlaying) midiFilePlayer.stop();
+        if (loadMidiFile (f))
+            midiFilePlayer.play(); // dropping a song = "play this"
+        return;
+    }
 }
 
 void MainComponent::doPlayPause()
