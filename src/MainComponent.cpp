@@ -38,7 +38,11 @@ MainComponent::MainComponent()
     opts.applicationName     = "NukedSC55JUCE";
     opts.filenameSuffix      = "settings";
     opts.osxLibrarySubFolder = "Application Support";
+   #if JUCE_LINUX || JUCE_BSD
+    opts.folderName          = ".config/NukedSC55JUCE"; // XDG-style, not ~/NukedSC55JUCE
+   #else
     opts.folderName          = "NukedSC55JUCE";
+   #endif
     props.setStorageParameters (opts);
 
     auto* user = props.getUserSettings();
