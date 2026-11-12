@@ -16,6 +16,7 @@ class MainComponent : public juce::AudioAppComponent,
                       public juce::MenuBarModel,
                       public juce::FileDragAndDropTarget,
                       private juce::MidiInputCallback,
+                      private juce::ChangeListener,
                       private juce::Timer
 {
 public:
@@ -46,6 +47,7 @@ public:
 private:
     void handleIncomingMidiMessage (juce::MidiInput*, const juce::MidiMessage&) override;
     void timerCallback() override;
+    void changeListenerCallback (juce::ChangeBroadcaster*) override; // audio device changed
 
     void pickMidiFile();
     bool loadMidiFile (const juce::File& f);
@@ -64,7 +66,8 @@ private:
     MidiFilePlayer midiFilePlayer;
 
     // Resampler state (Nuked native rate → audio device rate)
-    juce::LagrangeInterpolator interpL, interpR;
+    // Windowed-sinc (vs. Lagrange) for clean resampling of the 66 kHz core output
+    juce::WindowedSincInterpolator interpL, interpR;
     double outputSampleRate = 0.0;
     double resampleRatio    = 1.0;
     juce::HeapBlock<float> scratchL, scratchR;

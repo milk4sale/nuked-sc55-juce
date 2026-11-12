@@ -8,6 +8,8 @@ namespace
     const juce::String kPropsMidiIn   = "midiInputIdentifier";
     const juce::String kPropsLastFile = "lastMidiFile";
     const juce::String kPropsGain     = "masterGain";
+    const juce::String kPropsAudio    = "audioDeviceState";
+    constexpr double   kDefaultOutputRate = 96000.0; // above the core's 66207 Hz: upsample, never decimate
 
     static std::unique_ptr<juce::FileLogger> gLog;
     static void initLogger()
@@ -95,7 +97,20 @@ MainComponent::MainComponent()
         engine.postMidiMessage (m);
     });
 
-    setAudioChannels (0, 2);
+    // Restore the saved audio device setup; on first run, ask for 96 kHz so the
+    // emulator's 66207 Hz output is only ever upsampled (no band-limiting).
+    {
+        std::unique_ptr<juce::XmlElement> savedAudio (user->getXmlValue (kPropsAudio));
+        setAudioChannels (0, 2, savedAudio.get());
+        if (savedAudio == nullptr)
+        {
+            auto setup = deviceManager.getAudioDeviceSetup();
+            setup.sampleRate = kDefaultOutputRate;
+            const auto err = deviceManager.setAudioDeviceSetup (setup, true);
+            if (err.isNotEmpty()) L ("Could not set default output rate: " + err);
+        }
+        deviceManager.addChangeListener (this);
+    }
 
     // Restore MIDI input device (if previously selected and still present)
     if (savedMidi.isNotEmpty()) openMidiInput (savedMidi);
@@ -126,6 +141,7 @@ MainComponent::MainComponent()
 
 MainComponent::~MainComponent()
 {
+    deviceManager.removeChangeListener (this);
     midiFilePlayer.stop();
     closeMidiInput();
     engine.stop();
@@ -481,6 +497,16 @@ void MainComponent::openPreferences()
                 openMidiInput (id);
             }
         });
+}
+
+void MainComponent::changeListenerCallback (juce::ChangeBroadcaster*)
+{
+    // Persist output device / sample rate / buffer size picked in Preferences.
+    if (auto xml = deviceManager.createStateXml())
+        props.getUserSettings()->setValue (kPropsAudio, xml.get());
+    if (auto* dev = deviceManager.getCurrentAudioDevice())
+        L ("Audio device: " + dev->getName() + " @ " + juce::String (dev->getCurrentSampleRate())
+           + " Hz, " + juce::String (dev->getCurrentBufferSizeSamples()) + " samples");
 }
 
 void MainComponent::autoLoadRomsIfPossible()
