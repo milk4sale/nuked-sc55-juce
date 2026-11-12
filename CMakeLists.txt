@@ -95,6 +95,98 @@ else()
 endif()
 
 #===============================================================================
+# 88emu (SC-8820) — optional, from the gearmulator submodule under
+# external/gearmulator (GPL-3.0). Built as its own CMake project with
+# everything but 88emu switched off (no JUCE, no plugins), so it can't clash
+# with this project's JUCE. Produces one static archive, lib88emu.a, used
+# through 88emu's C interface (c_interface.h).
+#===============================================================================
+set(GEARMULATOR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/gearmulator)
+set(_88emu_default OFF)
+if(EXISTS "${GEARMULATOR_DIR}/source/ronaldo/88emu/88lib/c_interface.h" AND NOT MSVC)
+    set(_88emu_default ON)
+endif()
+option(NUKED_WITH_88EMU "Build the 88emu core for SC-8820 support (needs external/gearmulator)" ${_88emu_default})
+
+if(NUKED_WITH_88EMU)
+    if(NOT EXISTS "${GEARMULATOR_DIR}/source/cpu/dsp56300/source/asmjit/CMakeLists.txt")
+        message(FATAL_ERROR
+            "NUKED_WITH_88EMU is ON but gearmulator's submodules are missing. Run:\n"
+            "    git submodule update --init --depth 1 external/gearmulator\n"
+            "    git -C external/gearmulator submodule update --init --depth 1 --recursive \\\n"
+            "        source/cpu/dsp56300 source/cpu/mc68k source/3rdparty/cpp-terminal \\\n"
+            "        source/3rdparty/RmlUi source/3rdparty/freetype source/3rdparty/portmidi-latest \\\n"
+            "        source/3rdparty/lunasvg\n"
+            "or configure with -DNUKED_WITH_88EMU=OFF to build without SC-8820.")
+    endif()
+
+    include(ExternalProject)
+    set(_gm gearmulator)
+    set(EMU88_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}/gearmulator)
+    set(EMU88_LIBRARY ${EMU88_BINARY_DIR}/source/ronaldo/88emu/88lib/lib88emu.a)
+    if(CMAKE_BUILD_TYPE)
+        set(_emu88_build_type ${CMAKE_BUILD_TYPE})
+    else()
+        set(_emu88_build_type Release)
+    endif()
+
+    ExternalProject_Add(emu88_external
+        SOURCE_DIR       ${GEARMULATOR_DIR}
+        BINARY_DIR       ${EMU88_BINARY_DIR}
+        CMAKE_GENERATOR  ${CMAKE_GENERATOR}
+        CMAKE_ARGS
+            -DCMAKE_BUILD_TYPE=${_emu88_build_type}
+            -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+            -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+            -DBUILD_TESTING=OFF
+            -D${_gm}_BUILD_JUCEPLUGIN=OFF
+            -D${_gm}_BUILD_JUCEPLUGIN_CLAP=OFF
+            -D${_gm}_BUILD_INSTALLER=OFF
+            -D${_gm}_SYNTH_OSIRUS=OFF
+            -D${_gm}_SYNTH_OSTIRUS=OFF
+            -D${_gm}_SYNTH_VAVRA=OFF
+            -D${_gm}_SYNTH_XENIA=OFF
+            -D${_gm}_SYNTH_NODALRED2X=OFF
+            -D${_gm}_SYNTH_JE8086=OFF
+            -D${_gm}_SYNTH_88EMU=ON
+            -D${_gm}_COMPONENT_DSPBRIDGE=OFF
+        BUILD_COMMAND    ${CMAKE_COMMAND} --build <BINARY_DIR> --target 88emu_bundle
+        INSTALL_COMMAND  ""
+        BUILD_BYPRODUCTS ${EMU88_LIBRARY}
+        BUILD_ALWAYS     OFF
+        USES_TERMINAL_BUILD ON)
+
+    find_package(Threads REQUIRED)
+    add_library(emu88 STATIC IMPORTED GLOBAL)
+    set_target_properties(emu88 PROPERTIES IMPORTED_LOCATION ${EMU88_LIBRARY})
+    target_include_directories(emu88 INTERFACE ${GEARMULATOR_DIR}/source/ronaldo/88emu/88lib)
+    target_link_libraries(emu88 INTERFACE Threads::Threads ${CMAKE_DL_LIBS})
+    add_dependencies(emu88 emu88_external)
+    message(STATUS "88emu: SC-8820 support ON (gearmulator at ${GEARMULATOR_DIR})")
+else()
+    message(STATUS "88emu: SC-8820 support OFF")
+endif()
+
+#===============================================================================
+# Emulator cores behind one interface (src/EmulatorCore.h), shared by the GUI
+# app and the test runner.
+#===============================================================================
+add_library(emu_cores STATIC
+    src/EmulatorCore.cpp
+    src/NukedCore.cpp)
+target_include_directories(emu_cores PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(emu_cores PUBLIC nuked_sc55_backend)
+target_compile_features(emu_cores PUBLIC cxx_std_23)
+if(NUKED_WITH_88EMU)
+    target_sources(emu_cores PRIVATE src/Emu88Core.cpp)
+    target_link_libraries(emu_cores PUBLIC emu88)
+    target_compile_definitions(emu_cores PUBLIC NUKED_HAVE_88EMU=1)
+else()
+    target_compile_definitions(emu_cores PUBLIC NUKED_HAVE_88EMU=0)
+endif()
+
+#===============================================================================
 # Standalone JUCE GUI app
 #===============================================================================
 juce_add_gui_app(NukedSC55JUCE
@@ -123,7 +215,7 @@ target_compile_definitions(NukedSC55JUCE PRIVATE
     JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:NukedSC55JUCE,JUCE_VERSION>")
 
 target_link_libraries(NukedSC55JUCE PRIVATE
-    nuked_sc55_backend
+    emu_cores
     juce::juce_audio_basics
     juce::juce_audio_devices
     juce::juce_audio_formats
@@ -158,7 +250,7 @@ target_compile_definitions(NukedTestRunner PRIVATE
     JUCE_STANDALONE_APPLICATION=1)
 
 target_link_libraries(NukedTestRunner PRIVATE
-    nuked_sc55_backend
+    emu_cores
     juce::juce_audio_basics
     juce::juce_audio_formats
     juce::juce_core

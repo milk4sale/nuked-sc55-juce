@@ -5,41 +5,27 @@
 
 #include <memory>
 
-// Thin JUCE-facing wrapper around the Nuked-SC55 backend Emulator.
+#include "EmulatorCore.h"
+
+// JUCE-facing realtime wrapper around an EmulatorCore (Nuked-SC55 or 88emu, picked by model).
 //
 // Threading:
 //   - Construction and loadRoms() should be called on the message thread.
 //   - postMidiMessage() is safe to call from any thread (lock-free queue).
 //   - pullSamples() is the realtime audio thread entry point (lock-free).
-//   - start()/stop() spin up a dedicated emulator thread.
+//   - start()/stop() spin up a dedicated emulator thread, the only thread that touches the core.
 //
-// The emulator thread:
-//   1. Drains the MIDI input queue and feeds bytes to the emulator.
-//   2. Calls Emulator::Step() until enough samples accumulate.
-//   3. Sample-rate-converts the emulator's native rate (64000 or 66207 Hz)
-//      lazily — for v0.1 we expose the native rate and rely on the audio
-//      device sample-rate conversion. A proper resampler is a v0.2 task.
+// Output is at the core's native rate (see getNativeSampleRate()); MainComponent resamples it.
 
 class NukedEngine
 {
 public:
-    enum class Model
-    {
-        SC55mk2,
-        SC55,
-        SC55st,
-        CM300,
-        SCB55,
-        RLP3237,
-        SC155,
-        SC155mk2,
-        JV880,
-    };
+    using Model = EmuModel;
 
     static juce::StringArray getModelDisplayNames();
-    static Model modelFromIndex (int index);
-    static int   indexFromModel (Model m);
-    static juce::String displayName (Model m);
+    static Model modelFromIndex (int index)  { return emuModelFromIndex (index); }
+    static int   indexFromModel (Model m)    { return emuModelToIndex (m); }
+    static juce::String displayName (Model m){ return emuModelDisplayName (m); }
 
     NukedEngine();
     ~NukedEngine();
@@ -55,12 +41,10 @@ public:
     bool  isReady() const;
     Model getCurrentModel() const;
 
-    // The emulator's native output sample rate for the loaded model.
-    // 0 until loadRoms() succeeds.
+    // The core's native output sample rate for the loaded model. 0 until loadRoms() succeeds.
     int getNativeSampleRate() const;
 
-    // Send a GS or GM system reset via SysEx. Safe to call any time after
-    // loadRoms() succeeds.
+    // Send a GS or GM system reset. Safe to call any time after loadRoms() succeeds.
     void postSystemReset (bool gs);
 
     // Push a MIDI message into the emulator's input queue. Thread-safe,

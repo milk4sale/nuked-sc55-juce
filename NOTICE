@@ -36,6 +36,23 @@ before redistributing this software.
    of that binary complies with the Nuked-SC55 license.
 
 
+1b. 88emu (SC-8820 core, optional)
+----------------------------------
+
+   Upstream:  https://github.com/dsp56300/gearmulator (source/ronaldo/88emu)
+              as a git submodule under external/gearmulator
+   Authors:   The Usual Suspects (dsp56300, giulioz and contributors)
+   License:   GNU General Public License v3.0
+
+   88emu's GP chip code is derived from Nuked-SC55 (credited by 88emu).
+   GPL-3.0 forbids adding restrictions such as Nuked-SC55's
+   non-commercial clause, so a binary that links both Nuked-SC55 and
+   88emu must NOT be distributed. Build it for your own use only, or
+   configure with -DNUKED_WITH_88EMU=OFF to leave 88emu out.
+   This repository does not copy 88emu source; it references it as a
+   submodule and calls its C interface (c_interface.h).
+
+
 2. JUCE
 -------
 
@@ -52,7 +69,7 @@ before redistributing this software.
    redistribute JUCE source.
 
 
-3. Roland firmware (SC-55 / SC-55mk2 / CM-300 / JV-880 / etc. ROMs)
+3. Roland firmware (SC-55 / SC-55mk2 / CM-300 / JV-880 / SC-8820 / etc. ROMs)
 -------------------------------------------------------------------
 
    The Nuked-SC55 emulator requires ROM image files originating from

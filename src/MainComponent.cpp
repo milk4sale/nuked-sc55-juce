@@ -5,6 +5,7 @@ namespace
 {
     const juce::String kPropsRomDir   = "romDirectory";
     const juce::String kPropsModel    = "modelIndex";
+    const juce::String kPropsSc55Model= "lastSc55ModelIndex";
     const juce::String kPropsMidiIn   = "midiInputIdentifier";
     const juce::String kPropsLastFile = "lastMidiFile";
     const juce::String kPropsGain     = "masterGain";
@@ -48,13 +49,16 @@ MainComponent::MainComponent()
     props.setStorageParameters (opts);
 
     auto* user = props.getUserSettings();
-    currentModelIndex = user->getIntValue (kPropsModel, 0);
+    currentModelIndex = juce::jlimit (0, emuModelCount() - 1, user->getIntValue (kPropsModel, 0));
+    lastSc55ModelIndex = user->getIntValue (kPropsSc55Model, 0);
+    if (! emuModelUsesNuked (emuModelFromIndex (lastSc55ModelIndex))) lastSc55ModelIndex = 0;
+    if (emuModelUsesNuked (emuModelFromIndex (currentModelIndex))) lastSc55ModelIndex = currentModelIndex;
     currentRomDir     = juce::File (user->getValue (kPropsRomDir, juce::String()));
     const auto savedGain  = (float) user->getDoubleValue (kPropsGain, 0.8);
     const auto savedMidi  = user->getValue (kPropsMidiIn, juce::String());
     const auto savedFile  = user->getValue (kPropsLastFile, juce::String());
 
-    setSize (980, 252);
+    setSize (980, 264);
     setWantsKeyboardFocus (true);
 
     addAndMakeVisible (menuBar);
@@ -86,6 +90,24 @@ MainComponent::MainComponent()
 
     addAndMakeVisible (levelMeter);
     levelMeter.setPeakSource ([this] { return engine.getPeakLevel(); });
+
+    addAndMakeVisible (modelSwitchLabel);
+    modelSwitchLabel.setFont (juce::FontOptions (11.0f, juce::Font::bold));
+    modelSwitchLabel.setColour (juce::Label::textColourId, juce::Colour::fromRGB (130, 130, 140));
+
+    for (auto* b : { &sc55Button, &sc8820Button })
+    {
+        addAndMakeVisible (*b);
+        b->setClickingTogglesState (false); // state follows the loaded model, see syncModelSwitch()
+        b->setColour (juce::TextButton::buttonOnColourId, juce::Colour::fromRGB (70, 120, 200));
+    }
+    sc55Button.setConnectedEdges (juce::Button::ConnectedOnRight);
+    sc8820Button.setConnectedEdges (juce::Button::ConnectedOnLeft);
+    sc55Button.setTooltip ("Nuked-SC55 core. Pick the exact SC-55 variant in Edit > Preferences.");
+    sc8820Button.setTooltip ("88emu core. Needs your own SC-8820 ROM dumps in the ROM folder.");
+    sc55Button.onClick   = [this] { switchFamily (false); };
+    sc8820Button.onClick = [this] { switchFamily (true); };
+    syncModelSwitch();
 
     addAndMakeVisible (statusLabel);
     statusLabel.setFont (juce::FontOptions (12.0f));
@@ -265,7 +287,12 @@ void MainComponent::resized()
     area.removeFromTop (8);
 
     {
-        auto meterRow = area.removeFromTop (14);
+        auto meterRow = area.removeFromTop (24);
+        auto switchArea = meterRow.removeFromLeft (220);
+        modelSwitchLabel.setBounds (switchArea.removeFromLeft (52));
+        sc55Button.setBounds   (switchArea.removeFromLeft (80));
+        sc8820Button.setBounds (switchArea.removeFromLeft (80));
+        meterRow = meterRow.withSizeKeepingCentre (meterRow.getWidth(), 14);
         levelMeter.setBounds      (meterRow.removeFromRight (220));
         meterRow.removeFromRight (4);
         levelMeterLabel.setBounds (meterRow.removeFromRight (32));
@@ -314,8 +341,8 @@ void MainComponent::menuItemSelected (int id, int)
             juce::AlertWindow::showMessageBoxAsync (
                 juce::MessageBoxIconType::InfoIcon,
                 "Nuked SC-55 JUCE",
-                "JUCE host for the Nuked-SC55 emulator.\n"
-                "github.com/depixeled-chris/nuked-sc55-juce");
+                "JUCE host for the Nuked-SC55 emulator, with SC-8820 support via 88emu.\n"
+                "Based on github.com/depixeled-chris/nuked-sc55-juce");
             break;
     }
 }
@@ -331,11 +358,12 @@ void MainComponent::timerCallback()
     juce::String s;
     if (! engine.isReady())
     {
-        s = "Engine: not ready - load ROMs via Preferences.";
+        s = statusOverride.isNotEmpty() ? statusOverride
+                                        : juce::String ("Engine: not ready - load ROMs via Preferences.");
     }
     else
     {
-        s << "Engine: SC-55mk2 @ "
+        s << "Engine: " << NukedEngine::displayName (engine.getCurrentModel()) << " @ "
           << engine.getNativeSampleRate() << " Hz | output "
           << (int) outputSampleRate       << " Hz | peak "
           << juce::String (engine.getPeakLevel(), 3)
@@ -468,22 +496,14 @@ void MainComponent::openPreferences()
 
     PreferencesDialog::launch (
         this, init,
-        [this] (int modelIdx)
-        {
-            currentModelIndex = modelIdx;
-            props.getUserSettings()->setValue (kPropsModel, modelIdx);
-            juce::String err;
-            if (! loadRomsForCurrentSettings (err))
-                statusLabel.setText ("ROM load failed: " + err, juce::dontSendNotification);
-        },
+        [this] (int modelIdx) { selectModel (modelIdx); },
         [this] (const juce::File& dir)
         {
             currentRomDir = dir;
             juce::String err;
-            if (loadRomsForCurrentSettings (err))
-                props.getUserSettings()->setValue (kPropsRomDir, dir.getFullPathName());
-            else
-                statusLabel.setText ("ROM load failed: " + err, juce::dontSendNotification);
+            props.getUserSettings()->setValue (kPropsRomDir, dir.getFullPathName());
+            if (! loadRomsForCurrentSettings (err))
+                showRomError (err);
         },
         [this] (const juce::String& id)
         {
@@ -514,7 +534,56 @@ void MainComponent::autoLoadRomsIfPossible()
     if (! currentRomDir.isDirectory()) return;
     juce::String err;
     if (! loadRomsForCurrentSettings (err))
+    {
         L ("Auto-load ROMs failed: " + err);
+        statusOverride = "ROMs missing for " + NukedEngine::displayName (NukedEngine::modelFromIndex (currentModelIndex))
+                       + ". Pick another model or add the ROMs.";
+    }
+}
+
+void MainComponent::selectModel (int modelIdx)
+{
+    currentModelIndex = juce::jlimit (0, emuModelCount() - 1, modelIdx);
+    auto* user = props.getUserSettings();
+    user->setValue (kPropsModel, currentModelIndex);
+    if (emuModelUsesNuked (NukedEngine::modelFromIndex (currentModelIndex)))
+    {
+        lastSc55ModelIndex = currentModelIndex;
+        user->setValue (kPropsSc55Model, lastSc55ModelIndex);
+    }
+    syncModelSwitch();
+
+    juce::String err;
+    if (! loadRomsForCurrentSettings (err))
+        showRomError (err);
+}
+
+void MainComponent::switchFamily (bool sc8820)
+{
+    const int target = sc8820 ? NukedEngine::indexFromModel (NukedEngine::Model::SC8820) : lastSc55ModelIndex;
+    if (target == currentModelIndex && engine.isReady())
+        return;
+    selectModel (target);
+}
+
+void MainComponent::syncModelSwitch()
+{
+    const bool is8820 = NukedEngine::modelFromIndex (currentModelIndex) == NukedEngine::Model::SC8820;
+    sc55Button.setToggleState (! is8820, juce::dontSendNotification);
+    sc8820Button.setToggleState (is8820, juce::dontSendNotification);
+}
+
+void MainComponent::showRomError (const juce::String& err)
+{
+    const auto name = NukedEngine::displayName (NukedEngine::modelFromIndex (currentModelIndex));
+    statusOverride = "ROMs missing for " + name + ". See the message for which files.";
+    L ("ROM load failed: " + err);
+    juce::AlertWindow::showMessageBoxAsync (
+        juce::MessageBoxIconType::WarningIcon,
+        "Can't start " + name,
+        err + "\n\nROM folder: "
+            + (currentRomDir.isDirectory() ? currentRomDir.getFullPathName() : juce::String ("(not set)"))
+            + "\nSet it in Edit > Preferences. ROMs are not included with this app; use dumps of your own hardware.");
 }
 
 bool MainComponent::loadRomsForCurrentSettings (juce::String& err)
@@ -525,6 +594,7 @@ bool MainComponent::loadRomsForCurrentSettings (juce::String& err)
     const auto model = NukedEngine::modelFromIndex (currentModelIndex);
     L ("Loading ROMs: " + currentRomDir.getFullPathName() + ", model=" + juce::String (currentModelIndex));
 
+    statusOverride.clear();
     if (! engine.loadRoms (currentRomDir, model, err))
     {
         L ("loadRoms failed: " + err);

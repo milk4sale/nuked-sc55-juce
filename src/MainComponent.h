@@ -60,6 +60,10 @@ private:
     void openMidiInput (const juce::String& identifier);
     void closeMidiInput();
     void onPlayerStateChange (const juce::MidiMessage& m);
+    void selectModel (int modelIndex);   // persists, reloads ROMs, reports errors
+    void switchFamily (bool sc8820);     // main-window SC-55 / SC-8820 switch
+    void syncModelSwitch();
+    void showRomError (const juce::String& err);
 
     // Engine + transport core
     NukedEngine engine;
@@ -83,15 +87,20 @@ private:
     PlayerControls controls;
     juce::Label   levelMeterLabel { {}, "OUT" };
     LevelMeter    levelMeter;
+    juce::Label      modelSwitchLabel { {}, "MODEL" };
+    juce::TextButton sc55Button   { "SC-55" };
+    juce::TextButton sc8820Button { "SC-8820" };
 
     // Subsystems
     std::unique_ptr<juce::MidiInput> currentMidiIn;
     juce::String                   currentMidiInIdentifier;
     juce::File   currentRomDir;
     int          currentModelIndex = 0;
+    int          lastSc55ModelIndex = 0; // the Nuked model the "SC-55" switch returns to
     juce::File   lastMidiFile;
     juce::ApplicationProperties props;
     bool dragHover = false;
+    juce::String statusOverride; // shown while no engine is running
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

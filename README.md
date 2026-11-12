@@ -1,4 +1,22 @@
-# nuked-sc55-juce
+# nuked-sc55-juce (SC-55 + SC-8820 fork)
+
+> **This is a fork** of [depixeled-chris/nuked-sc55-juce](https://github.com/depixeled-chris/nuked-sc55-juce).
+> It is what I use to play MIDI files on Linux (Arch / CachyOS, Hyprland) through hardware-accurate
+> Roland Sound Canvas emulation instead of a soundfont. On top of upstream it adds:
+>
+> - **SC-8820 emulation**, through [88emu](https://github.com/dsp56300/gearmulator/blob/main/doc/88emu_readme.md)
+>   (The Usual Suspects, part of gearmulator). It runs the real SC-8820 firmware on emulated SH-2 / XP6 / LSP chips.
+>   This is not a soundfont or an approximation.
+> - **An SC-55 / SC-8820 switch** in the main window. The choice is saved. The exact SC-55 variant is still picked in
+>   Preferences, and the switch goes back to it.
+> - **A clear error when ROMs are missing.** You get a dialog listing the files the selected model needs, not a crash or silence.
+> - Linux niceties: settings in `~/.config/NukedSC55JUCE/`, uppercase `.MID` files show in the file picker,
+>   drag-and-drop a MIDI file onto the window to play it, 96 kHz default output with windowed-sinc resampling,
+>   and the audio device choice is remembered.
+>
+> **No ROMs are included, and none are embedded.** You supply dumps of your own hardware; see [ROM situation](#rom-situation--read-this-too).
+> **Source only, no binaries:** see [License situation](#license-situation--read-this-before-building),
+> which matters even more here because 88emu is GPL-3.0.
 
 A JUCE-based standalone host for the [Nuked-SC55](https://github.com/nukeykt/Nuked-SC55) Roland Sound Canvas and JV-880 hardware emulator.
 
@@ -78,6 +96,12 @@ That clause makes it incompatible with **GPL** (which forbids adding restriction
 
 Because of the combined-work license conflict (Nuked-SC55's non-commercial clause + JUCE's GPLv3-or-paid licensing), this repository ships **source only**. Building binaries is the user's responsibility. Files in `src/` and the `CMakeLists.txt` itself are MIT-licensed (see `LICENSE`); the combined binary inherits Nuked-SC55's restrictions in practice.
 
+### This fork adds a GPL-3.0 core (88emu)
+
+The SC-8820 core, 88emu, comes from [gearmulator](https://github.com/dsp56300/gearmulator), which is **GPL-3.0**. GPL-3.0 does not allow extra restrictions like Nuked-SC55's non-commercial clause, so **a binary containing both cores cannot be legally distributed by anyone**. Building and using it yourself is fine; GPL-3.0 §2 puts no conditions on private use. This repo only references gearmulator as a git submodule (it does not copy its code), and it ships no binaries.
+
+If you need a binary you can share, build with `-DNUKED_WITH_88EMU=OFF` (Nuked-SC55 only, upstream's situation), or use 88emu's own player for the SC-8820.
+
 If you want to push for binary distribution, the right path is asking nukeykt (Nuked-SC55's author) for written permission to redistribute non-commercial binaries. He's responsive on his issue tracker.
 
 ---
@@ -107,6 +131,32 @@ The app expects ROMs to follow Nuked-SC55's "legacy" filename scheme. Place them
 | **RLP-3237** | `rlp3237_rom1.bin`, `rlp3237_rom2.bin`, `rlp3237_waverom1.bin` |
 | **SC-155** | `sc155_rom1.bin`, `sc155_rom2.bin`, `sc155_waverom1.bin`, `sc155_waverom2.bin`, `sc155_waverom3.bin` |
 | **JV-880** (v1.0.0 / v1.0.1) | `jv880_rom1.bin`, `jv880_rom2.bin`, `jv880_waverom1.bin`, `jv880_waverom2.bin` |
+
+### SC-8820 ROMs (88emu)
+
+88emu finds ROMs by **content** (MD5 + size), searching the ROM folder **and its subfolders**, so you can keep them apart, e.g. `<ROM folder>/SC-8820/`. If a dump isn't recognized by hash, these standard names are used as a fallback:
+
+| File | Size | What it is |
+|---|---|---|
+| `sc8820_internal.bin` | 64 KiB | SH7016 CPU internal ROM |
+| `sc8820_program.bin` | 2 MiB | program flash |
+| `sc8820_wave0.bin` | 16 MiB | wave ROM |
+| `sc8820_wave1.bin` | 8 MiB | wave ROM |
+
+All four are required. If any are missing, switching to SC-8820 opens a dialog listing what 88emu expects (names, sizes, known hashes), and the app stays usable. Switch back to SC-55 to keep playing. 88emu's [ROM documentation](https://github.com/dsp56300/gearmulator/blob/main/doc/88emu_readme.md#rom-loading) covers alternative layouts.
+
+Example layout:
+
+```
+~/.local/share/nuked-sc55/roms/          <- set this as the ROM directory in Preferences
+├── rom1.bin, rom2.bin, rom_sm.bin, waverom1.bin, waverom2.bin   (SC-55mk2, Nuked names)
+├── sc55_rom1.bin, ...                                            (SC-55, Nuked names)
+└── SC-8820/
+    ├── sc8820_internal.bin
+    ├── sc8820_program.bin
+    ├── sc8820_wave0.bin
+    └── sc8820_wave1.bin
+```
 
 Full list and exact chip-to-filename mappings are in [`external/Nuked-SC55/doc/USAGE.md`](https://github.com/jcmoyer/Nuked-SC55/blob/master/doc/USAGE.md). Your local checkout pins a specific submodule commit, so check `documentation/USAGE.md` inside the submodule for that exact version.
 
@@ -151,11 +201,19 @@ If your JUCE is somewhere else, pass `-DJUCE_LOCAL_PATH=/path/to/JUCE` at CMake 
 ### Clone with submodules
 
 ```bash
-git clone --recurse-submodules https://github.com/depixeled-chris/nuked-sc55-juce.git
+git clone https://github.com/milk4sale/nuked-sc55-juce.git
 cd nuked-sc55-juce
+git submodule update --init --depth 1 external/Nuked-SC55 external/gearmulator
+# gearmulator's own submodules, minus its JUCE copy (not needed here):
+git -C external/gearmulator submodule update --init --depth 1 --recursive \
+    source/cpu/dsp56300 source/cpu/mc68k source/3rdparty/cpp-terminal \
+    source/3rdparty/RmlUi source/3rdparty/freetype source/3rdparty/portmidi-latest \
+    source/3rdparty/lunasvg
 ```
 
-(Already cloned without `--recurse-submodules`? Run `git submodule update --init --recursive`.)
+Don't want SC-8820? Skip the gearmulator lines and configure with `-DNUKED_WITH_88EMU=OFF`.
+
+88emu builds as its own CMake sub-build with only 88emu switched on (no JUCE, no plugins), producing one static `lib88emu.a`. The first build takes a few extra minutes. The 88emu part currently builds with GCC/Clang only, so Windows/MSVC builds default to `NUKED_WITH_88EMU=OFF`.
 
 ### Windows (Visual Studio 2022)
 
@@ -185,7 +243,16 @@ Output: `build/NukedSC55JUCE_artefacts/Release/Nuked SC-55 JUCE.app`
 
 ### Linux
 
-Install the JUCE Linux dependencies first:
+Install the JUCE Linux dependencies first.
+
+Arch / CachyOS / Manjaro:
+
+```bash
+sudo pacman -S --needed base-devel cmake ninja git alsa-lib jack2 freetype2 fontconfig \
+    libx11 libxcomposite libxcursor libxext libxinerama libxrandr libxrender mesa glu
+```
+
+Debian / Ubuntu:
 
 ```bash
 sudo apt-get install libasound2-dev libjack-jackd2-dev \
@@ -202,7 +269,7 @@ cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-Output: `build/NukedSC55JUCE_artefacts/Nuked SC-55 JUCE`
+Output: `build/NukedSC55JUCE_artefacts/Release/Nuked SC-55 JUCE` (and `NukedTestRunner` next to it under `NukedTestRunner_artefacts/Release/`).
 
 ---
 
@@ -215,15 +282,16 @@ Output: `build/NukedSC55JUCE_artefacts/Nuked SC-55 JUCE`
 5. *(Optional)* **MIDI input:** pick a system MIDI port if you want to drive the emulator from a DAW or external player (e.g. a loopMIDI virtual port).
 6. *(Optional)* **Audio device:** verify your output device is correct (the picker is at the bottom of the Preferences dialog).
 7. Close Preferences. The engine auto-loads as soon as a valid ROM directory is set; the status bar will read "Engine: ... @ 66207 Hz".
-8. **File → Open MIDI...**, pick a `.mid` file.
-9. Click **Play**.
+8. Use the **SC-55 / SC-8820** switch under the transport to change cores. The choice is saved.
+9. **File → Open MIDI...**, pick a `.mid` file (or drag one onto the window).
+10. Click **Play**.
 
 On subsequent launches, ROMs auto-load from the saved path and the last-opened MIDI file is restored. Just hit Play.
 
 If you hear nothing:
 - Check the status bar at the bottom: it shows engine state and live diagnostics (`peak` should rise above zero when audio is being produced; `fifo` should be at a healthy non-zero percentage).
 - Verify the output device in **Edit → Preferences → Audio device** — pick the right one if JUCE picked a virtual/silent default.
-- Try the headless **`NukedTestRunner.exe`** to verify the emulator works in isolation; if it produces a non-silent WAV, the problem is in the GUI's audio path, not the core.
+- Try the headless **`NukedTestRunner`** (`--model=9` is SC-8820, `--model=0` SC-55mk2, `--model=1` SC-55) to verify the emulator works in isolation; if it produces a non-silent WAV, the problem is in the GUI's audio path, not the core.
 
 ---
 

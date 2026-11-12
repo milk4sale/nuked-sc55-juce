@@ -2,7 +2,7 @@
 //
 // Headless validation runner. Reads the same settings the GUI app saves
 // (ROM dir, model, last MIDI file) and renders the MIDI file offline
-// through Nuked-SC55 directly, writing a WAV and a verbose log.
+// through the selected core (Nuked-SC55 or 88emu), writing a WAV and a verbose log.
 //
 // Run from the command line — no UI, no audio device, fully deterministic.
 
@@ -16,10 +16,7 @@
 #include <iostream>
 #include <vector>
 
-#include "backend/emu.h"
-#include "backend/rom.h"
-#include "backend/rom_io.h"
-#include "backend/audio.h"
+#include "EmulatorCore.h"
 
 namespace
 {
@@ -31,57 +28,30 @@ namespace
         std::cout << s << std::endl;
         if (g_logger != nullptr) g_logger->logMessage (s);
     }
-
-    Romset romsetFromIndex (int idx)
-    {
-        switch (idx)
-        {
-            case 0: return Romset::MK2;
-            case 1: return Romset::MK1;
-            case 2: return Romset::ST;
-            case 3: return Romset::CM300;
-            case 4: return Romset::SCB55;
-            case 5: return Romset::RLP3237;
-            case 6: return Romset::SC155;
-            case 7: return Romset::SC155MK2;
-            case 8: return Romset::JV880;
-            default: return Romset::MK2;
-        }
-    }
-
-    int nativeRateFor (int modelIdx)
-    {
-        // mk2 (0), st (2), sc155mk2 (7) → 66207, else 64000
-        return (modelIdx == 0 || modelIdx == 2 || modelIdx == 7) ? 66207 : 64000;
-    }
 }
 
 // --- offline sample collector --------------------------------------------------
 
-struct SampleCollector
+struct SampleCollector final : FrameSink
 {
     std::vector<float> left;
     std::vector<float> right;
-    std::atomic<uint64_t> count { 0 };
+    uint64_t count = 0;
     double minL =  1e30, maxL = -1e30, minR = 1e30, maxR = -1e30;
     double sumAbs = 0.0;
-};
 
-static void sampleCallback (void* userdata, const AudioFrame<int32_t>& f)
-{
-    auto* c = static_cast<SampleCollector*> (userdata);
-    constexpr float scale = 1.0f / 536870912.0f;
-    const float L = (float) f.left  * scale;
-    const float R = (float) f.right * scale;
-    c->left.push_back (L);
-    c->right.push_back (R);
-    c->count.fetch_add (1, std::memory_order_relaxed);
-    if (L < c->minL) c->minL = L;
-    if (L > c->maxL) c->maxL = L;
-    if (R < c->minR) c->minR = R;
-    if (R > c->maxR) c->maxR = R;
-    c->sumAbs += std::abs (L) + std::abs (R);
-}
+    void pushFrame (float L, float R) override
+    {
+        left.push_back (L);
+        right.push_back (R);
+        ++count;
+        if (L < minL) minL = L;
+        if (L > maxL) maxL = L;
+        if (R < minR) minR = R;
+        if (R > maxR) maxR = R;
+        sumAbs += std::abs (L) + std::abs (R);
+    }
+};
 
 // --- main --------------------------------------------------------------------
 
@@ -146,88 +116,45 @@ int main (int argc, char** argv)
         return 2;
     }
 
-    // --- load ROMs --------------------------------------------------------
-    const Romset romset = romsetFromIndex (modelIdx);
-    const int nativeRate = nativeRateFor (modelIdx);
-    L ("Native sample rate: " + juce::String (nativeRate));
+    // --- load ROMs + boot the core ----------------------------------------
+    const auto model = emuModelFromIndex (modelIdx);
+    L ("Model: " + juce::String (emuModelDisplayName (model))
+       + (emuModelUsesNuked (model) ? " (Nuked-SC55)" : " (88emu)"));
 
-    RomsetInfo info;
-    SetRomsetFilenames (info, romDir.getFullPathName().toStdString(), romset, ROMLOCATION_ALL);
-    L ("SetRomsetFilenames done. Expected paths:");
-    for (size_t i = 0; i < ROMLOCATION_COUNT; ++i)
+    std::string loadError;
+    const auto t0 = std::chrono::steady_clock::now();
+    auto core = createEmulatorCore (model, romDir.getFullPathName().toStdString(), loadError);
+    if (core == nullptr)
     {
-        if (! info.rom_paths[i].empty())
-            L ("  [" + juce::String (ToCString ((RomLocation) i)) + "] " + juce::String (info.rom_paths[i].string()));
-    }
-
-    RomLoadStatusSet loadStatus{};
-    LoadRomset (info, &loadStatus);
-    L ("LoadRomset complete. Per-slot status:");
-    for (size_t i = 0; i < loadStatus.size(); ++i)
-    {
-        if (loadStatus[i] == RomLoadStatus::Loaded || loadStatus[i] == RomLoadStatus::Failed)
-        {
-            L ("  [" + juce::String (ToCString ((RomLocation) i)) + "] "
-                  + juce::String (ToCString (loadStatus[i]))
-                  + " (" + juce::String ((int) info.rom_data[i].size()) + " bytes)");
-        }
-    }
-
-    RomCompletionStatusSet completion{};
-    if (! IsCompleteRomset (info, romset, &completion))
-    {
-        juce::StringArray missing;
-        for (size_t i = 0; i < completion.size(); ++i)
-            if (completion[i] == RomCompletionStatus::Missing)
-                missing.add (ToCString ((RomLocation) i));
-        L ("FATAL: incomplete romset. Missing: " + missing.joinIntoString (", "));
+        L ("FATAL: " + juce::String (loadError));
         return 3;
     }
-    L ("Romset complete.");
-
-    // --- emulator setup ---------------------------------------------------
-    auto emu = std::make_unique<Emulator>();
-    if (! emu->Init ({ nullptr, {} })) { L ("FATAL: Emulator::Init failed"); return 4; }
-    L ("Emulator::Init OK");
-
-    if (! emu->LoadRoms (romset, info)) { L ("FATAL: LoadRoms failed"); return 5; }
-    L ("LoadRoms OK");
-
-    emu->Reset();
-    emu->GetPCM().enable_oversampling = true;
-    L ("Reset + oversampling enabled");
+    const auto bootMs = std::chrono::duration_cast<std::chrono::milliseconds> (
+        std::chrono::steady_clock::now() - t0).count();
+    const int nativeRate = core->nativeSampleRate();
+    L ("Core ready in " + juce::String ((juce::int64) bootMs) + " ms, native sample rate "
+       + juce::String (nativeRate) + " Hz");
 
     SampleCollector collector;
-    collector.left.reserve (nativeRate * 60);
-    collector.right.reserve (nativeRate * 60);
-    emu->SetSampleCallback (&sampleCallback, &collector);
-    L ("Sample callback installed");
+    collector.left.reserve ((size_t) nativeRate * 32);
+    collector.right.reserve ((size_t) nativeRate * 32);
 
-    // Warm up the emulator: run for ~250ms of native samples so it
-    // initializes its PCM state and is ready to play.
-    const uint64_t warmupSamples = nativeRate / 4;
-    L ("Warming up emulator for " + juce::String ((juce::int64) warmupSamples) + " samples...");
+    auto runFrames = [&] (uint64_t frames)
     {
-        auto t0 = std::chrono::steady_clock::now();
-        while (collector.count.load() < warmupSamples)
-            emu->Step();
-        auto t1 = std::chrono::steady_clock::now();
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds> (t1 - t0).count();
-        L ("Warmup done. " + juce::String ((juce::int64) collector.count.load())
-              + " samples in " + juce::String ((juce::int64) ms) + " ms wall-clock");
-    }
+        const uint64_t target = collector.count + frames;
+        while (collector.count < target)
+            core->run (collector, (int) std::min<uint64_t> (64, target - collector.count));
+    };
 
-    // Send a GS reset SysEx — covers MIDIs that omit it
-    {
-        L ("Sending GS reset SysEx...");
-        const uint8_t gsReset[] = { 0xF0, 0x41, 0x10, 0x42, 0x12, 0x40, 0x00, 0x7F, 0x00, 0x41, 0xF7 };
-        for (auto b : gsReset)
-            emu->PostMIDI (b);
-        // Run a bit so the reset takes effect
-        const uint64_t target = collector.count.load() + nativeRate / 10;
-        while (collector.count.load() < target) emu->Step();
-        L ("GS reset processed.");
-    }
+    // Warm up ~250 ms so the PCM state settles before playing.
+    L ("Warming up for " + juce::String (nativeRate / 4) + " frames...");
+    runFrames ((uint64_t) nativeRate / 4);
+
+    // GS reset covers MIDI files that omit it.
+    L ("Sending GS reset...");
+    core->postSystemReset (true);
+    runFrames ((uint64_t) nativeRate / 10);
+    L ("GS reset processed.");
 
     // --- parse the MIDI file ----------------------------------------------
     juce::MidiFile mf;
@@ -249,14 +176,14 @@ int main (int argc, char** argv)
     L ("Rendering " + juce::String (renderSeconds, 2) + " s ("
           + juce::String ((juce::int64) totalSamplesNeeded) + " samples)...");
 
-    const uint64_t startCount = collector.count.load();
+    const uint64_t startCount = collector.count;
     uint64_t midiBytesPosted  = 0;
     int     nextEvent          = 0;
     const int numEvents        = merged.getNumEvents();
 
-    while (collector.count.load() - startCount < totalSamplesNeeded)
+    while (collector.count - startCount < totalSamplesNeeded)
     {
-        const uint64_t relSamples = collector.count.load() - startCount;
+        const uint64_t relSamples = collector.count - startCount;
         const double   nowSec     = (double) relSamples / nativeRate;
 
         // Dispatch any events whose time has come
@@ -268,17 +195,16 @@ int main (int argc, char** argv)
             {
                 const auto* data = evt->message.getRawData();
                 const int    n    = evt->message.getRawDataSize();
-                for (int i = 0; i < n; ++i)
-                    emu->PostMIDI ((uint8_t) data[i]);
+                core->postMidi (data, (size_t) n);
                 midiBytesPosted += (uint64_t) n;
             }
             ++nextEvent;
         }
-        emu->Step();
+        core->run (collector, 64);
     }
     L ("Render done. Events sent: " + juce::String (nextEvent) + "/" + juce::String (numEvents)
           + ", MIDI bytes: " + juce::String ((juce::int64) midiBytesPosted)
-          + ", samples produced: " + juce::String ((juce::int64) (collector.count.load() - startCount)));
+          + ", samples produced: " + juce::String ((juce::int64) (collector.count - startCount)));
 
     // --- statistics -------------------------------------------------------
     const uint64_t n = collector.left.size();

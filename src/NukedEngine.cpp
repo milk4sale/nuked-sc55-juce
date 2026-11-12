@@ -1,63 +1,20 @@
 #include "NukedEngine.h"
 
 #include <atomic>
-#include <thread>
 #include <chrono>
-#include <array>
-
-// Nuked backend headers. These are C++20 and pull in <span> and <filesystem>.
-#include "backend/emu.h"
-#include "backend/rom.h"
-#include "backend/rom_io.h"
-#include "backend/audio.h"
-
-namespace
-{
-    constexpr float kSampleScale = 1.0f / 536870912.0f; // matches Normalize() in Nuked's audio.h
-
-    int nativeRateForModel (NukedEngine::Model m)
-    {
-        // From Nuked-SC55 USAGE.md / standard frontend:
-        //   SC-55mk2 / SC-55st / SC-155mk2 produce ~66207 Hz
-        //   everything else                produces  64000 Hz
-        switch (m)
-        {
-            case NukedEngine::Model::SC55mk2:
-            case NukedEngine::Model::SC155mk2:
-                return 66207;
-            default:
-                return 64000;
-        }
-    }
-
-    Romset toNukedRomset (NukedEngine::Model m)
-    {
-        switch (m)
-        {
-            case NukedEngine::Model::SC55mk2:  return Romset::MK2;
-            case NukedEngine::Model::SC55:     return Romset::MK1;
-            case NukedEngine::Model::SC55st:   return Romset::ST;
-            case NukedEngine::Model::CM300:    return Romset::CM300;
-            case NukedEngine::Model::SCB55:    return Romset::SCB55;
-            case NukedEngine::Model::RLP3237:  return Romset::RLP3237;
-            case NukedEngine::Model::SC155:    return Romset::SC155;
-            case NukedEngine::Model::SC155mk2: return Romset::SC155MK2;
-            case NukedEngine::Model::JV880:    return Romset::JV880;
-        }
-        return Romset::MK2;
-    }
-}
+#include <cmath>
+#include <thread>
 
 //==============================================================================
 // Pimpl
 //==============================================================================
 
-class NukedEngine::Impl
+class NukedEngine::Impl : private FrameSink
 {
 public:
     Impl()
     {
-        // Audio ringbuffer — ~0.5 seconds at native rates.
+        // Audio ringbuffer, ~0.5 s at native rates.
         constexpr int kAudioSlots = 1 << 15; // 32768 stereo frames
         audioL.allocate ((size_t) kAudioSlots, true);
         audioR.allocate ((size_t) kAudioSlots, true);
@@ -78,73 +35,23 @@ public:
     {
         stop();
         ready.store (false, std::memory_order_release); // honest until proven ready
-        emu.reset();
+        core.reset();
 
-        if (! dir.isDirectory())
-        {
-            err = "ROM directory does not exist: " + dir.getFullPathName();
-            return false;
-        }
-
-        const Romset romset = toNukedRomset (model);
+        std::string error;
         const std::filesystem::path basePath = dir.getFullPathName().toStdString();
-
-        RomsetInfo info;
-        SetRomsetFilenames (info, basePath, romset, ROMLOCATION_ALL);
-
-        RomLoadStatusSet loadStatus{};
-        LoadRomset (info, &loadStatus);
-
-        // Stricter than IsCompleteRomset: every REQUIRED slot must have
-        // non-empty rom_data after LoadRomset. IsCompleteRomset only checks
-        // that paths are set (which SetRomsetFilenames does unconditionally),
-        // so it returns true even when files don't exist on disk.
-        juce::StringArray missing;
-        for (size_t i = 0; i < ROMLOCATION_COUNT; ++i)
+        core = createEmulatorCore (model, basePath, error);
+        if (core == nullptr)
         {
-            const auto loc = (RomLocation) i;
-            if (! IsRequiredRom (romset, loc))
-                continue;
-            if (info.rom_data[i].empty())
-                missing.add (juce::String (ToCString (loc)));
-        }
-        if (! missing.isEmpty())
-        {
-            err = "Required ROM file(s) not found in '"
-                  + juce::String (basePath.string()) + "': "
-                  + missing.joinIntoString (", ")
-                  + ". Did you pick a subdirectory by mistake?";
+            err = juce::String (error);
             return false;
         }
-
-        emu = std::make_unique<Emulator>();
-        if (! emu->Init ({ /* lcd_backend = */ nullptr, /* nvram_filename = */ {} }))
-        {
-            err = "Emulator::Init failed.";
-            emu.reset();
-            return false;
-        }
-
-        // RomsetInfo must outlive the emulator: it holds the std::vector<uint8_t>
-        // buffers that the emulator may reference by pointer / span.
-        romsetInfo = std::move (info);
-
-        if (! emu->LoadRoms (romset, romsetInfo))
-        {
-            err = "Emulator::LoadRoms failed.";
-            emu.reset();
-            return false;
-        }
-
-        emu->Reset();
-        emu->GetPCM().enable_oversampling = true; // match the native-rate values we report
-        emu->SetSampleCallback (&Impl::sampleCallbackTrampoline, this);
 
         totalSamples.store (0);
         totalMidiBytes.store (0);
+        peak.store (0.0f);
 
         currentModel = model;
-        nativeRate = nativeRateForModel (model);
+        nativeRate = core->nativeSampleRate();
         ready.store (true, std::memory_order_release);
         return true;
     }
@@ -168,7 +75,7 @@ public:
 
         const auto scope = midiFifo->write (size);
         if (scope.blockSize1 + scope.blockSize2 < size)
-            return; // queue full — drop message
+            return; // queue full, drop message
         for (int i = 0; i < scope.blockSize1; ++i)
             midiBuf[scope.startIndex1 + i] = data[i];
         for (int i = 0; i < scope.blockSize2; ++i)
@@ -195,7 +102,7 @@ public:
 
     uint64_t getTotalSamplesProduced() const   { return totalSamples.load (std::memory_order_relaxed); }
     uint64_t getTotalMidiBytesProcessed() const{ return totalMidiBytes.load (std::memory_order_relaxed); }
-    float    getPeakLevel() const              { return (float) peakAbs.load (std::memory_order_relaxed) * kSampleScale; }
+    float    getPeakLevel() const              { return peak.load (std::memory_order_relaxed); }
     int      getAudioFifoUsedPercent() const
     {
         const int total = audioFifo ? audioFifo->getTotalSize() : 1;
@@ -242,34 +149,24 @@ private:
     void runLoop()
     {
         using namespace std::chrono_literals;
+        constexpr int kHighWaterMark = (1 << 15) * 3 / 4;
+        constexpr int kFramesPerSlice = 64; // ~1 ms: keeps MIDI timing tight
 
         while (running.load (std::memory_order_acquire))
         {
-            // Drain MIDI input
             drainMidi();
 
-            // Apply pending system reset, if any
             if (auto resetFlag = pendingReset.exchange (0, std::memory_order_acq_rel))
-            {
-                emu->PostSystemReset (resetFlag == 1
-                                      ? EMU_SystemReset::GS_RESET
-                                      : EMU_SystemReset::GM_RESET);
-            }
+                core->postSystemReset (resetFlag == 1);
 
-            // Throttle: if the audio ringbuffer is mostly full, sleep instead
-            // of generating more samples. The audio thread will drain it.
-            constexpr int kHighWaterMark = (1 << 15) * 3 / 4;
+            // Throttle: if the audio ringbuffer is mostly full, let the audio thread drain it.
             if (audioFifo->getNumReady() > kHighWaterMark)
             {
                 std::this_thread::sleep_for (500us);
                 continue;
             }
 
-            // Step the emulator. Each Step() may or may not produce a sample
-            // (depending on internal cycle counters). Loop a small batch so
-            // we don't pay the syscall cost per single step.
-            for (int i = 0; i < 64; ++i)
-                emu->Step();
+            core->run (*this, kFramesPerSlice);
         }
     }
 
@@ -279,50 +176,39 @@ private:
         if (avail <= 0) return;
 
         const auto scope = midiFifo->read (avail);
-        for (int i = 0; i < scope.blockSize1; ++i)
-            emu->PostMIDI (midiBuf[scope.startIndex1 + i]);
-        for (int i = 0; i < scope.blockSize2; ++i)
-            emu->PostMIDI (midiBuf[scope.startIndex2 + i]);
+        if (scope.blockSize1 > 0) core->postMidi (midiBuf.getData() + scope.startIndex1, (size_t) scope.blockSize1);
+        if (scope.blockSize2 > 0) core->postMidi (midiBuf.getData() + scope.startIndex2, (size_t) scope.blockSize2);
 
         totalMidiBytes.fetch_add ((uint64_t) avail, std::memory_order_relaxed);
     }
 
-    static void sampleCallbackTrampoline (void* userdata, const AudioFrame<int32_t>& f)
-    {
-        static_cast<Impl*> (userdata)->onSample (f);
-    }
-
-    void onSample (const AudioFrame<int32_t>& f)
+    // FrameSink, called on the emulator thread.
+    void pushFrame (float l, float r) override
     {
         totalSamples.fetch_add (1, std::memory_order_relaxed);
 
-        // Diagnostic: track absolute peak ever observed (saturates at INT32_MAX/2).
-        const int32_t absL = f.left  < 0 ? -f.left  : f.left;
-        const int32_t absR = f.right < 0 ? -f.right : f.right;
-        const int32_t abs  = absL > absR ? absL : absR;
-        int32_t prev = peakAbs.load (std::memory_order_relaxed);
-        while (abs > prev
-               && ! peakAbs.compare_exchange_weak (prev, abs,
-                                                   std::memory_order_relaxed,
-                                                   std::memory_order_relaxed))
+        // Diagnostic: absolute peak ever observed.
+        const float a = std::max (std::abs (l), std::abs (r));
+        float prev = peak.load (std::memory_order_relaxed);
+        while (a > prev
+               && ! peak.compare_exchange_weak (prev, a, std::memory_order_relaxed, std::memory_order_relaxed))
         { /* retry */ }
 
         const auto scope = audioFifo->write (1);
         if (scope.blockSize1 == 1)
         {
-            audioL[scope.startIndex1] = (float) f.left  * kSampleScale;
-            audioR[scope.startIndex1] = (float) f.right * kSampleScale;
+            audioL[scope.startIndex1] = l;
+            audioR[scope.startIndex1] = r;
         }
         else if (scope.blockSize2 == 1)
         {
-            audioL[scope.startIndex2] = (float) f.left  * kSampleScale;
-            audioR[scope.startIndex2] = (float) f.right * kSampleScale;
+            audioL[scope.startIndex2] = l;
+            audioR[scope.startIndex2] = r;
         }
-        // If FIFO full, drop the sample. Throttle in runLoop() prevents this in practice.
+        // If FIFO is full the frame is dropped; the throttle in runLoop() prevents this in practice.
     }
 
-    std::unique_ptr<Emulator> emu;
-    RomsetInfo romsetInfo; // must outlive emu — holds ROM byte vectors
+    std::unique_ptr<EmulatorCore> core;
     NukedEngine::Model currentModel = NukedEngine::Model::SC55mk2;
     int  nativeRate = 0;
     std::atomic<bool> ready { false };
@@ -330,7 +216,7 @@ private:
     std::atomic<int>  pendingReset { 0 }; // 0 = none, 1 = GS, 2 = GM
     std::atomic<uint64_t> totalSamples { 0 };
     std::atomic<uint64_t> totalMidiBytes { 0 };
-    std::atomic<int32_t>  peakAbs { 0 };
+    std::atomic<float>    peak { 0.0f };
     std::atomic<float>    masterGain { 1.0f };
 
     juce::HeapBlock<float>  audioL, audioR;
@@ -351,56 +237,14 @@ NukedEngine::~NukedEngine() = default;
 
 juce::StringArray NukedEngine::getModelDisplayNames()
 {
-    return {
-        "Roland SC-55mk2 (v1.01)",
-        "Roland SC-55 (v1.21)",
-        "Roland SC-55st (v1.01)",
-        "Roland CM-300 / SCC-1",
-        "Roland SCB-55",
-        "Roland RLP-3237",
-        "Roland SC-155",
-        "Roland SC-155mk2",
-        "Roland JV-880",
-    };
-}
-
-NukedEngine::Model NukedEngine::modelFromIndex (int i)
-{
-    switch (i)
+    juce::StringArray names;
+    for (int i = 0; i < emuModelCount(); ++i)
     {
-        case 0: return Model::SC55mk2;
-        case 1: return Model::SC55;
-        case 2: return Model::SC55st;
-        case 3: return Model::CM300;
-        case 4: return Model::SCB55;
-        case 5: return Model::RLP3237;
-        case 6: return Model::SC155;
-        case 7: return Model::SC155mk2;
-        case 8: return Model::JV880;
-        default: return Model::SC55mk2;
+        const auto m = emuModelFromIndex (i);
+        names.add (juce::String (emuModelDisplayName (m))
+                   + (emuModelIsBuilt (m) ? juce::String() : juce::String (" (not in this build)")));
     }
-}
-
-int NukedEngine::indexFromModel (Model m)
-{
-    switch (m)
-    {
-        case Model::SC55mk2:  return 0;
-        case Model::SC55:     return 1;
-        case Model::SC55st:   return 2;
-        case Model::CM300:    return 3;
-        case Model::SCB55:    return 4;
-        case Model::RLP3237:  return 5;
-        case Model::SC155:    return 6;
-        case Model::SC155mk2: return 7;
-        case Model::JV880:    return 8;
-    }
-    return 0;
-}
-
-juce::String NukedEngine::displayName (Model m)
-{
-    return getModelDisplayNames()[indexFromModel (m)];
+    return names;
 }
 
 bool NukedEngine::loadRoms (const juce::File& dir, Model model, juce::String& err)

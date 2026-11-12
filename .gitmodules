@@ -1,3 +1,7 @@
 [submodule "external/Nuked-SC55"]
 	path = external/Nuked-SC55
 	url = https://github.com/jcmoyer/Nuked-SC55.git
+[submodule "external/gearmulator"]
+	path = external/gearmulator
+	url = https://github.com/dsp56300/gearmulator.git
+	shallow = true
