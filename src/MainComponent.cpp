@@ -19,7 +19,7 @@ namespace
         auto exeDir = juce::File::getSpecialLocation (juce::File::currentExecutableFile).getParentDirectory();
         auto logFile = exeDir.getChildFile ("nuked-sc55-juce.log");
         logFile.deleteFile();
-        gLog = std::make_unique<juce::FileLogger> (logFile, "Nuked SC-55 JUCE log", 0);
+        gLog = std::make_unique<juce::FileLogger> (logFile, "Nuked SC-55/8820 JUCE log", 0);
     }
     static void L (const juce::String& s) { if (gLog) gLog->logMessage (s); }
 
@@ -340,7 +340,7 @@ void MainComponent::menuItemSelected (int id, int)
         case HelpAbout:
             juce::AlertWindow::showMessageBoxAsync (
                 juce::MessageBoxIconType::InfoIcon,
-                "Nuked SC-55 JUCE",
+                "Nuked SC-55/8820 JUCE",
                 "JUCE host for the Nuked-SC55 emulator, with SC-8820 support via 88emu.\n"
                 "Based on github.com/depixeled-chris/nuked-sc55-juce");
             break;

@@ -1,4 +1,4 @@
-# nuked-sc55-juce (SC-55 + SC-8820 fork)
+# Nuked SC-55/8820 JUCE
 
 > **This is a fork** of [depixeled-chris/nuked-sc55-juce](https://github.com/depixeled-chris/nuked-sc55-juce).
 > It is what I use to play MIDI files on Linux (Arch / CachyOS, Hyprland) through hardware-accurate
@@ -222,7 +222,7 @@ cmake -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 ```
 
-The executable lands in `build/NukedSC55JUCE_artefacts/Release/Nuked SC-55 JUCE.exe`.
+The executable lands in `build/NukedSC55JUCE_artefacts/Release/nuked-sc55-sc8820.exe`.
 
 ### Windows (Ninja + MSVC, faster)
 
@@ -239,7 +239,7 @@ cmake -B build -G Xcode
 cmake --build build --config Release
 ```
 
-Output: `build/NukedSC55JUCE_artefacts/Release/Nuked SC-55 JUCE.app`
+Output: `build/NukedSC55JUCE_artefacts/Release/nuked-sc55-sc8820.app`
 
 ### Linux
 
@@ -269,7 +269,7 @@ cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-Output: `build/NukedSC55JUCE_artefacts/Release/Nuked SC-55 JUCE` (and `NukedTestRunner` next to it under `NukedTestRunner_artefacts/Release/`).
+Output: `build/NukedSC55JUCE_artefacts/Release/nuked-sc55-sc8820` (and `NukedTestRunner` next to it under `NukedTestRunner_artefacts/Release/`).
 
 ---
 

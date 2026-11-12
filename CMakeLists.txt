@@ -190,7 +190,7 @@ endif()
 # Standalone JUCE GUI app
 #===============================================================================
 juce_add_gui_app(NukedSC55JUCE
-    PRODUCT_NAME "Nuked SC-55 JUCE"
+    PRODUCT_NAME "nuked-sc55-sc8820"
     COMPANY_NAME "nuked-sc55-juce")
 
 target_sources(NukedSC55JUCE PRIVATE
@@ -211,7 +211,7 @@ target_compile_definitions(NukedSC55JUCE PRIVATE
     JUCE_USE_CURL=0
     JUCE_DISPLAY_SPLASH_SCREEN=0
     JUCE_WIN_PER_MONITOR_DPI_AWARE=1
-    JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:NukedSC55JUCE,JUCE_PRODUCT_NAME>"
+    JUCE_APPLICATION_NAME_STRING="Nuked SC-55/8820 JUCE" # display name; PRODUCT_NAME is the file name, where a slash is not allowed
     JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:NukedSC55JUCE,JUCE_VERSION>")
 
 target_link_libraries(NukedSC55JUCE PRIVATE
